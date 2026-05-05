@@ -1,0 +1,492 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>OTP One-Way WebRTC Test</title>
+    <style>
+      body {
+        font-family: Arial, sans-serif;
+        background: #f6f7fb;
+        color: #1d1d1f;
+        margin: 0;
+        padding: 24px;
+      }
+      .container {
+        max-width: 980px;
+        margin: 0 auto;
+      }
+      .grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+        gap: 16px;
+      }
+      .card {
+        background: #fff;
+        padding: 16px;
+        border-radius: 12px;
+        box-shadow: 0 6px 20px rgba(0, 0, 0, 0.08);
+      }
+      h1 {
+        font-size: 22px;
+        margin-bottom: 16px;
+      }
+      label {
+        font-size: 12px;
+        color: #586069;
+        display: block;
+        margin-bottom: 6px;
+      }
+      input, select, button {
+        width: 100%;
+        padding: 10px 12px;
+        border-radius: 8px;
+        border: 1px solid #d0d7de;
+        margin-bottom: 10px;
+        font-size: 14px;
+        box-sizing: border-box;
+      }
+      button {
+        background: #2f6feb;
+        color: #fff;
+        border: none;
+        cursor: pointer;
+      }
+      button.secondary {
+        background: #eaeef2;
+        color: #1d1d1f;
+      }
+      button.danger {
+        background: #d93f3f;
+      }
+      .row {
+        display: flex;
+        gap: 10px;
+      }
+      .row button {
+        flex: 1;
+      }
+      .status {
+        font-size: 13px;
+        margin-bottom: 6px;
+      }
+      .otp {
+        font-weight: bold;
+        letter-spacing: 2px;
+      }
+      .log {
+        background: #0b1220;
+        color: #d0d7de;
+        padding: 10px;
+        border-radius: 10px;
+        height: 140px;
+        overflow: auto;
+        font-size: 12px;
+      }
+      video {
+        width: 100%;
+        background: #111;
+        border-radius: 10px;
+        margin-bottom: 10px;
+      }
+      .hidden {
+        display: none;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <h1>OTP One-Way WebRTC Test</h1>
+      <div class="grid">
+        <div class="card">
+          <label>Server URL</label>
+          <input id="serverUrl" placeholder="http://localhost:3000" />
+          <button id="connectBtn">Connect</button>
+          <div class="status" id="status">Status: disconnected</div>
+
+          <label>Your OTP</label>
+          <div class="status otp" id="otpValue">-</div>
+          <div class="row">
+            <button id="registerBtn">Register</button>
+            <button id="resetOtpBtn" class="secondary">Reset OTP</button>
+          </div>
+          <div class="log" id="log"></div>
+        </div>
+
+        <div class="card">
+          <label>Role</label>
+          <select id="roleSelect">
+            <option value="requester">Requester (view only)</option>
+            <option value="target">Target (send audio/video)</option>
+          </select>
+
+          <div id="requesterPane">
+            <label>Target OTP</label>
+            <input id="targetOtpInput" placeholder="Enter target OTP" />
+            <button id="requestBtn">Send Request</button>
+            <button id="endBtn" class="danger">End Session</button>
+          </div>
+
+          <div id="targetPane" class="hidden">
+            <label>Incoming Request</label>
+            <div class="status" id="incomingStatus">No requests</div>
+            <div class="row">
+              <button id="acceptBtn">Accept</button>
+              <button id="rejectBtn" class="secondary">Reject</button>
+            </div>
+            <label>Capture Mode</label>
+            <select id="captureMode">
+              <option value="av">Audio + Video</option>
+              <option value="audio">Audio only</option>
+              <option value="video">Video only</option>
+            </select>
+            <button id="startCameraBtn">Start Camera & Send Offer</button>
+            <button id="endBtnTarget" class="danger">End Session</button>
+          </div>
+        </div>
+
+        <div class="card">
+          <label>Target Local Preview</label>
+          <video id="localVideo" autoplay playsinline muted></video>
+          <label>Requester Remote View</label>
+          <video id="remoteVideo" autoplay playsinline></video>
+        </div>
+      </div>
+    </div>
+
+    <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+    <script>
+      const EVENTS = {
+        REGISTER_USER: "register-user",
+        REGISTERED: "registered",
+        MONITOR_REQUEST: "monitor-request",
+        REQUEST_SENT: "request-sent",
+        INCOMING_REQUEST: "incoming-request",
+        TARGET_RESPONSE: "target-response",
+        REQUEST_ACCEPTED: "request-accepted",
+        REQUEST_REJECTED: "request-rejected",
+        TARGET_READY: "target-ready",
+        OFFER: "offer",
+        ANSWER: "answer",
+        ICE_CANDIDATE: "ice-candidate",
+        END_SESSION: "end-session",
+        SESSION_ENDED: "session-ended",
+        USER_LEFT: "user-left",
+        ERROR: "error-message"
+      };
+
+      const STUN_CONFIG = {
+        iceServers: [{ urls: "stun:stun.l.google.com:19302" }]
+      };
+
+      const els = {
+        serverUrl: document.getElementById("serverUrl"),
+        connectBtn: document.getElementById("connectBtn"),
+        status: document.getElementById("status"),
+        otpValue: document.getElementById("otpValue"),
+        registerBtn: document.getElementById("registerBtn"),
+        resetOtpBtn: document.getElementById("resetOtpBtn"),
+        log: document.getElementById("log"),
+        roleSelect: document.getElementById("roleSelect"),
+        requesterPane: document.getElementById("requesterPane"),
+        targetPane: document.getElementById("targetPane"),
+        targetOtpInput: document.getElementById("targetOtpInput"),
+        requestBtn: document.getElementById("requestBtn"),
+        endBtn: document.getElementById("endBtn"),
+        incomingStatus: document.getElementById("incomingStatus"),
+        acceptBtn: document.getElementById("acceptBtn"),
+        rejectBtn: document.getElementById("rejectBtn"),
+        startCameraBtn: document.getElementById("startCameraBtn"),
+        endBtnTarget: document.getElementById("endBtnTarget"),
+        captureMode: document.getElementById("captureMode"),
+        localVideo: document.getElementById("localVideo"),
+        remoteVideo: document.getElementById("remoteVideo")
+      };
+
+      let socket = null;
+      let sessionId = null;
+      let localStream = null;
+      let peerConnection = null;
+      let pendingCandidates = [];
+
+      const log = (message) => {
+        const line = document.createElement("div");
+        line.textContent = `[${new Date().toLocaleTimeString()}] ${message}`;
+        els.log.appendChild(line);
+        els.log.scrollTop = els.log.scrollHeight;
+      };
+
+      const setStatus = (message) => {
+        els.status.textContent = `Status: ${message}`;
+      };
+
+      const updateRoleUI = () => {
+        const role = els.roleSelect.value;
+        els.requesterPane.classList.toggle("hidden", role !== "requester");
+        els.targetPane.classList.toggle("hidden", role !== "target");
+      };
+
+      const generateOtp = () => {
+        let otp = "";
+        for (let i = 0; i < 6; i += 1) {
+          otp += Math.floor(Math.random() * 10).toString();
+        }
+        return otp;
+      };
+
+      const getStoredOtp = () => sessionStorage.getItem("demoOtp");
+
+      const storeOtp = (otp) => {
+        sessionStorage.setItem("demoOtp", otp);
+        els.otpValue.textContent = otp;
+      };
+
+      const clearOtp = () => {
+        sessionStorage.removeItem("demoOtp");
+        els.otpValue.textContent = "-";
+      };
+
+      const cleanupPeer = () => {
+        pendingCandidates = [];
+        if (peerConnection) {
+          peerConnection.onicecandidate = null;
+          peerConnection.ontrack = null;
+          peerConnection.close();
+          peerConnection = null;
+        }
+        if (localStream) {
+          localStream.getTracks().forEach((track) => track.stop());
+          localStream = null;
+        }
+        els.localVideo.srcObject = null;
+        els.remoteVideo.srcObject = null;
+      };
+
+      const resetSession = () => {
+        sessionId = null;
+        cleanupPeer();
+        els.incomingStatus.textContent = "No requests";
+      };
+
+      const ensurePeerConnection = () => {
+        if (peerConnection) {
+          return peerConnection;
+        }
+        peerConnection = new RTCPeerConnection(STUN_CONFIG);
+        peerConnection.onicecandidate = (event) => {
+          if (event.candidate && socket && sessionId) {
+            socket.emit(EVENTS.ICE_CANDIDATE, {
+              sessionId,
+              candidate: event.candidate
+            });
+          }
+        };
+        peerConnection.ontrack = (event) => {
+          els.remoteVideo.srcObject = event.streams[0];
+        };
+        pendingCandidates.forEach((candidate) => {
+          peerConnection.addIceCandidate(candidate).catch(() => {});
+        });
+        pendingCandidates = [];
+        return peerConnection;
+      };
+
+      const registerUser = () => {
+        if (!socket) {
+          log("Connect to server first.");
+          return;
+        }
+        const storedOtp = getStoredOtp();
+        const otpToSend = storedOtp || generateOtp();
+        socket.emit(EVENTS.REGISTER_USER, { otp: otpToSend });
+        log(`Registering with OTP ${otpToSend}`);
+      };
+
+      const connectSocket = () => {
+        if (socket && socket.connected) {
+          log("Already connected.");
+          return;
+        }
+        const url = els.serverUrl.value.trim() || window.location.origin;
+        socket = io(url, { transports: ["websocket"] });
+
+        socket.on("connect", () => {
+          setStatus("connected");
+          log("Connected to server.");
+        });
+
+        socket.on("disconnect", () => {
+          setStatus("disconnected");
+          log("Disconnected from server.");
+          resetSession();
+        });
+
+        socket.on(EVENTS.REGISTERED, ({ otp }) => {
+          storeOtp(otp);
+          log(`Registered. OTP: ${otp}`);
+        });
+
+        socket.on(EVENTS.REQUEST_SENT, ({ sessionId: id }) => {
+          sessionId = id;
+          log(`Request sent. Session: ${id}`);
+        });
+
+        socket.on(EVENTS.INCOMING_REQUEST, ({ sessionId: id, fromOtp }) => {
+          sessionId = id;
+          els.incomingStatus.textContent = `Incoming from ${fromOtp} (session ${id})`;
+          log(`Incoming request from ${fromOtp}`);
+        });
+
+        socket.on(EVENTS.REQUEST_ACCEPTED, ({ sessionId: id }) => {
+          sessionId = id;
+          log(`Request accepted. Session: ${id}`);
+        });
+
+        socket.on(EVENTS.REQUEST_REJECTED, ({ sessionId: id }) => {
+          log(`Request rejected. Session: ${id}`);
+          resetSession();
+        });
+
+        socket.on(EVENTS.TARGET_READY, ({ sessionId: id }) => {
+          log(`Target ready. Session: ${id}`);
+        });
+
+        socket.on(EVENTS.OFFER, async ({ sessionId: id, offer }) => {
+          sessionId = id;
+          const pc = ensurePeerConnection();
+          await pc.setRemoteDescription(offer);
+          const answer = await pc.createAnswer();
+          await pc.setLocalDescription(answer);
+          socket.emit(EVENTS.ANSWER, { sessionId, answer });
+          log("Offer received and answer sent.");
+        });
+
+        socket.on(EVENTS.ANSWER, async ({ answer }) => {
+          if (!peerConnection) {
+            return;
+          }
+          await peerConnection.setRemoteDescription(answer);
+          log("Answer received.");
+        });
+
+        socket.on(EVENTS.ICE_CANDIDATE, ({ candidate }) => {
+          if (!candidate) {
+            return;
+          }
+          if (peerConnection) {
+            peerConnection.addIceCandidate(candidate).catch(() => {});
+          } else {
+            pendingCandidates.push(candidate);
+          }
+        });
+
+        socket.on(EVENTS.SESSION_ENDED, ({ reason }) => {
+          log(`Session ended (${reason}).`);
+          resetSession();
+        });
+
+        socket.on(EVENTS.USER_LEFT, ({ reason }) => {
+          log(`User left (${reason}).`);
+          resetSession();
+        });
+
+        socket.on(EVENTS.ERROR, ({ code, message }) => {
+          log(`Error ${code}: ${message}`);
+          if (code === "OTP_IN_USE") {
+            clearOtp();
+          }
+        });
+      };
+
+      const startTargetMedia = async () => {
+        if (!socket || !sessionId) {
+          log("No active session.");
+          return;
+        }
+        const mode = els.captureMode ? els.captureMode.value : "av";
+        const constraints = {
+          video: mode !== "audio",
+          audio: mode !== "video"
+        };
+        try {
+          localStream = await navigator.mediaDevices.getUserMedia(constraints);
+        } catch (err) {
+          if (err && err.name === "NotFoundError") {
+            log("No matching camera/mic found. Try Audio only or check devices.");
+            return;
+          }
+          if (err && err.name === "NotAllowedError") {
+            log("Permission denied. Allow camera/mic in browser settings.");
+            return;
+          }
+          if (err && err.name === "NotReadableError") {
+            log("Device is busy. Close other apps using camera/mic.");
+            return;
+          }
+          log(`getUserMedia failed: ${err && err.name ? err.name : "unknown"}`);
+          return;
+        }
+        els.localVideo.srcObject = localStream;
+        const pc = ensurePeerConnection();
+        localStream.getTracks().forEach((track) => pc.addTrack(track, localStream));
+        socket.emit(EVENTS.TARGET_READY, { sessionId });
+        const offer = await pc.createOffer();
+        await pc.setLocalDescription(offer);
+        socket.emit(EVENTS.OFFER, { sessionId, offer });
+        log("Target ready and offer sent.");
+      };
+
+      els.connectBtn.addEventListener("click", connectSocket);
+      els.registerBtn.addEventListener("click", registerUser);
+      els.resetOtpBtn.addEventListener("click", () => {
+        clearOtp();
+        log("Local OTP reset. Click Register again.");
+      });
+      els.roleSelect.addEventListener("change", updateRoleUI);
+      els.requestBtn.addEventListener("click", () => {
+        if (!socket) {
+          log("Connect to server first.");
+          return;
+        }
+        const targetOtp = els.targetOtpInput.value.trim();
+        if (!targetOtp) {
+          log("Enter target OTP.");
+          return;
+        }
+        socket.emit(EVENTS.MONITOR_REQUEST, { targetOtp });
+      });
+      els.endBtn.addEventListener("click", () => {
+        if (!socket || !sessionId) {
+          log("No active session.");
+          return;
+        }
+        socket.emit(EVENTS.END_SESSION, { sessionId });
+      });
+      els.acceptBtn.addEventListener("click", () => {
+        if (!socket || !sessionId) {
+          log("No incoming session.");
+          return;
+        }
+        socket.emit(EVENTS.TARGET_RESPONSE, { sessionId, accept: true });
+      });
+      els.rejectBtn.addEventListener("click", () => {
+        if (!socket || !sessionId) {
+          log("No incoming session.");
+          return;
+        }
+        socket.emit(EVENTS.TARGET_RESPONSE, { sessionId, accept: false });
+      });
+      els.startCameraBtn.addEventListener("click", startTargetMedia);
+      els.endBtnTarget.addEventListener("click", () => {
+        if (!socket || !sessionId) {
+          log("No active session.");
+          return;
+        }
+        socket.emit(EVENTS.END_SESSION, { sessionId });
+      });
+
+      els.serverUrl.value = window.location.origin;
+      updateRoleUI();
+    </script>
+  </body>
+</html>
