@@ -317,18 +317,20 @@ export const registerSocketHandlers = (io) => {
         emitError(socket, "SESSION_NOT_FOUND", "Session not found.");
         return;
       }
-      const peerOtp = getPeerOtp(session, senderOtp);
-      if (!peerOtp) {
-        emitError(socket, "NOT_IN_SESSION", "Sender is not in this session.");
+      if (session.requesterOtp !== senderOtp) {
+        emitError(socket, "NOT_REQUESTER", "Only requester can end the session.");
         return;
       }
       clearRequestTimeout(sessionId);
       endSession(sessionId, reason);
-      sendToOtp(io, peerOtp, EVENTS.SESSION_ENDED, {
-        sessionId,
-        reason,
-        fromOtp: senderOtp
-      });
+      const peerOtp = getPeerOtp(session, senderOtp);
+      if (peerOtp) {
+        sendToOtp(io, peerOtp, EVENTS.SESSION_ENDED, {
+          sessionId,
+          reason,
+          fromOtp: senderOtp
+        });
+      }
       socket.emit(EVENTS.SESSION_ENDED, { sessionId, reason });
       console.log(`[user] left otp=${senderOtp} reason=${reason}`);
     };

@@ -101,47 +101,37 @@
         <div class="card">
           <label>Server URL</label>
           <input id="serverUrl" placeholder="http://localhost:3000" />
-          <button id="connectBtn">Connect</button>
           <div class="status" id="status">Status: disconnected</div>
 
           <label>Your OTP</label>
           <div class="status otp" id="otpValue">-</div>
           <div class="row">
-            <button id="registerBtn">Register</button>
             <button id="resetOtpBtn" class="secondary">Reset OTP</button>
           </div>
           <div class="log" id="log"></div>
         </div>
 
         <div class="card">
-          <label>Role</label>
-          <select id="roleSelect">
-            <option value="requester">Requester (view only)</option>
-            <option value="target">Target (send audio/video)</option>
-          </select>
-
           <div id="requesterPane">
             <label>Target OTP</label>
             <input id="targetOtpInput" placeholder="Enter target OTP" />
-            <button id="requestBtn">Send Request</button>
-            <button id="endBtn" class="danger">End Session</button>
+            <div id="mediaControls" class="hidden">
+              <div class="row">
+                <label style="display:flex; align-items:center; gap:8px; margin-bottom:10px;">
+                  <input id="micToggle" type="checkbox" checked style="width:auto; margin:0;" />
+                  Mic
+                </label>
+                <label style="display:flex; align-items:center; gap:8px; margin-bottom:10px;">
+                  <input id="videoToggle" type="checkbox" checked style="width:auto; margin:0;" />
+                  Video
+                </label>
+              </div>
+            </div>
+            <button id="requestEndBtn" class="danger hidden">End Session</button>
           </div>
 
-          <div id="targetPane" class="hidden">
-            <label>Incoming Request</label>
-            <div class="status" id="incomingStatus">No requests</div>
-            <div class="row">
-              <button id="acceptBtn">Accept</button>
-              <button id="rejectBtn" class="secondary">Reject</button>
-            </div>
-            <label>Capture Mode</label>
-            <select id="captureMode">
-              <option value="av">Audio + Video</option>
-              <option value="audio">Audio only</option>
-              <option value="video">Video only</option>
-            </select>
-            <button id="startCameraBtn">Start Camera & Send Offer</button>
-            <button id="endBtnTarget" class="danger">End Session</button>
+          <div id="targetPane">
+            <div class="status hidden" id="incomingStatus">No requests</div>
           </div>
         </div>
 
@@ -181,24 +171,18 @@
 
       const els = {
         serverUrl: document.getElementById("serverUrl"),
-        connectBtn: document.getElementById("connectBtn"),
         status: document.getElementById("status"),
         otpValue: document.getElementById("otpValue"),
-        registerBtn: document.getElementById("registerBtn"),
         resetOtpBtn: document.getElementById("resetOtpBtn"),
         log: document.getElementById("log"),
-        roleSelect: document.getElementById("roleSelect"),
         requesterPane: document.getElementById("requesterPane"),
         targetPane: document.getElementById("targetPane"),
+        mediaControls: document.getElementById("mediaControls"),
         targetOtpInput: document.getElementById("targetOtpInput"),
-        requestBtn: document.getElementById("requestBtn"),
-        endBtn: document.getElementById("endBtn"),
         incomingStatus: document.getElementById("incomingStatus"),
-        acceptBtn: document.getElementById("acceptBtn"),
-        rejectBtn: document.getElementById("rejectBtn"),
-        startCameraBtn: document.getElementById("startCameraBtn"),
-        endBtnTarget: document.getElementById("endBtnTarget"),
-        captureMode: document.getElementById("captureMode"),
+        requestEndBtn: document.getElementById("requestEndBtn"),
+        micToggle: document.getElementById("micToggle"),
+        videoToggle: document.getElementById("videoToggle"),
         localVideo: document.getElementById("localVideo"),
         remoteVideo: document.getElementById("remoteVideo")
       };
@@ -208,6 +192,12 @@
       let localStream = null;
       let peerConnection = null;
       let pendingCandidates = [];
+      let isRegistered = false;
+      let isRegistering = false;
+      let pendingRegisterActions = [];
+      let lastAutoRequestOtp = null;
+      let autoRequestTimer = null;
+      let localOtp = null;
 
       const log = (message) => {
         const line = document.createElement("div");
@@ -220,12 +210,6 @@
         els.status.textContent = `Status: ${message}`;
       };
 
-      const updateRoleUI = () => {
-        const role = els.roleSelect.value;
-        els.requesterPane.classList.toggle("hidden", role !== "requester");
-        els.targetPane.classList.toggle("hidden", role !== "target");
-      };
-
       const generateOtp = () => {
         let otp = "";
         for (let i = 0; i < 6; i += 1) {
@@ -234,16 +218,27 @@
         return otp;
       };
 
-      const getStoredOtp = () => sessionStorage.getItem("demoOtp");
+      const ensureLocalOtp = (forceNew = false) => {
+        if (!localOtp || forceNew) {
+          localOtp = generateOtp();
+        }
+        sessionStorage.setItem("demoOtp", localOtp);
+        els.otpValue.textContent = localOtp;
+        return localOtp;
+      };
 
       const storeOtp = (otp) => {
+        localOtp = otp;
         sessionStorage.setItem("demoOtp", otp);
         els.otpValue.textContent = otp;
       };
 
       const clearOtp = () => {
         sessionStorage.removeItem("demoOtp");
+        localOtp = null;
         els.otpValue.textContent = "-";
+        isRegistered = false;
+        isRegistering = false;
       };
 
       const cleanupPeer = () => {
@@ -266,6 +261,9 @@
         sessionId = null;
         cleanupPeer();
         els.incomingStatus.textContent = "No requests";
+        lastAutoRequestOtp = null;
+        els.requestEndBtn.classList.add("hidden");
+        els.mediaControls.classList.add("hidden");
       };
 
       const ensurePeerConnection = () => {
@@ -292,19 +290,88 @@
       };
 
       const registerUser = () => {
-        if (!socket) {
-          log("Connect to server first.");
+        if (isRegistering) {
+          log("Registration already in progress.");
           return;
         }
-        const storedOtp = getStoredOtp();
-        const otpToSend = storedOtp || generateOtp();
-        socket.emit(EVENTS.REGISTER_USER, { otp: otpToSend });
-        log(`Registering with OTP ${otpToSend}`);
+        isRegistering = true;
+        isRegistered = false;
+
+        const doRegister = () => {
+          const otpToSend = ensureLocalOtp();
+          socket.emit(EVENTS.REGISTER_USER, { otp: otpToSend });
+          log(`Registering with OTP ${otpToSend}`);
+        };
+
+        if (!socket || !socket.connected) {
+          log("Socket not connected — connecting now...");
+          connectSocket();
+          // Wait for socket to connect, then register
+          if (socket && typeof socket.once === "function") {
+            socket.once("connect", doRegister);
+          } else {
+            // Fallback: small delay then attempt register
+            setTimeout(() => {
+              if (socket && socket.connected) doRegister();
+            }, 500);
+          }
+          return;
+        }
+
+        doRegister();
+      };
+
+      const ensureConnectedAndRegistered = (action) => {
+        if (!socket || !socket.connected) {
+          connectSocket();
+          if (socket && typeof socket.once === "function") {
+            socket.once("connect", () => ensureConnectedAndRegistered(action));
+          }
+          return;
+        }
+
+        if (isRegistered) {
+          action();
+          return;
+        }
+
+        pendingRegisterActions.push(action);
+        if (!isRegistering) {
+          registerUser();
+        }
+      };
+
+      const sendMonitorRequest = (targetOtp) => {
+        socket.emit(EVENTS.MONITOR_REQUEST, { targetOtp });
+        log(`Request sent to OTP ${targetOtp}.`);
+      };
+
+      const acceptTargetRequest = async () => {
+        if (!socket || !sessionId) {
+          log("No incoming session.");
+          return;
+        }
+
+        socket.emit(EVENTS.TARGET_RESPONSE, { sessionId, accept: true });
+        log(`Request accepted. Session: ${sessionId}`);
+        await startTargetMedia();
       };
 
       const connectSocket = () => {
-        if (socket && socket.connected) {
-          log("Already connected.");
+        if (socket) {
+          if (socket.connected) {
+            log("Already connected.");
+            return;
+          }
+          if (socket.io && socket.io.uri !== (els.serverUrl.value.trim() || window.location.origin)) {
+            log("Socket URL changed. Recreating connection.");
+            socket.removeAllListeners();
+            socket.close();
+            socket = null;
+          } else {
+            log("Socket already created. Reconnecting now.");
+            socket.connect();
+          }
           return;
         }
         const url = els.serverUrl.value.trim() || window.location.origin;
@@ -313,32 +380,58 @@
         socket.on("connect", () => {
           setStatus("connected");
           log("Connected to server.");
+          if (!isRegistered && !isRegistering) {
+            registerUser();
+          }
+        });
+
+        socket.on("connect_error", (err) => {
+          setStatus("connect error");
+          log(`Connect error: ${err && err.message ? err.message : "unknown"}`);
         });
 
         socket.on("disconnect", () => {
           setStatus("disconnected");
           log("Disconnected from server.");
+          isRegistered = false;
+          isRegistering = false;
+          pendingRegisterActions = [];
+          lastAutoRequestOtp = null;
           resetSession();
         });
 
         socket.on(EVENTS.REGISTERED, ({ otp }) => {
           storeOtp(otp);
           log(`Registered. OTP: ${otp}`);
+          isRegistered = true;
+          isRegistering = false;
+          const actions = pendingRegisterActions.slice();
+          pendingRegisterActions = [];
+          actions.forEach((action) => action());
         });
 
         socket.on(EVENTS.REQUEST_SENT, ({ sessionId: id }) => {
           sessionId = id;
+          els.requestEndBtn.classList.remove("hidden");
+          els.mediaControls.classList.remove("hidden");
           log(`Request sent. Session: ${id}`);
         });
 
         socket.on(EVENTS.INCOMING_REQUEST, ({ sessionId: id, fromOtp }) => {
           sessionId = id;
-          els.incomingStatus.textContent = `Incoming from ${fromOtp} (session ${id})`;
+          els.requestEndBtn.classList.add("hidden");
+          els.mediaControls.classList.add("hidden");
+          els.incomingStatus.textContent = `Incoming from ${fromOtp}`;
           log(`Incoming request from ${fromOtp}`);
+          acceptTargetRequest().catch((err) => {
+            log(`Auto-accept failed: ${err && err.message ? err.message : "unknown"}`);
+          });
         });
 
         socket.on(EVENTS.REQUEST_ACCEPTED, ({ sessionId: id }) => {
           sessionId = id;
+          els.requestEndBtn.classList.remove("hidden");
+          els.mediaControls.classList.remove("hidden");
           log(`Request accepted. Session: ${id}`);
         });
 
@@ -394,8 +487,36 @@
           log(`Error ${code}: ${message}`);
           if (code === "OTP_IN_USE") {
             clearOtp();
+            isRegistering = false;
+            isRegistered = false;
+            ensureLocalOtp(true);
+            registerUser();
           }
         });
+      };
+
+      const endCurrentSession = () => {
+        if (!socket || !sessionId) {
+          log("No active session.");
+          return;
+        }
+        socket.emit(EVENTS.END_SESSION, { sessionId });
+        resetSession();
+        log("Session end requested.");
+      };
+
+      const maybeAutoRequest = () => {
+        const rawOtp = els.targetOtpInput.value.trim();
+        const targetOtp = rawOtp.replace(/\D/g, "");
+        if (targetOtp.length < 6) {
+          lastAutoRequestOtp = null;
+          return;
+        }
+        if (targetOtp === lastAutoRequestOtp) {
+          return;
+        }
+        lastAutoRequestOtp = targetOtp;
+        ensureConnectedAndRegistered(() => sendMonitorRequest(targetOtp));
       };
 
       const startTargetMedia = async () => {
@@ -403,11 +524,16 @@
           log("No active session.");
           return;
         }
-        const mode = els.captureMode ? els.captureMode.value : "av";
+        const micEnabled = Boolean(els.micToggle && els.micToggle.checked);
+        const videoEnabled = Boolean(els.videoToggle && els.videoToggle.checked);
         const constraints = {
-          video: mode !== "audio",
-          audio: mode !== "video"
+          video: videoEnabled,
+          audio: micEnabled
         };
+        if (!constraints.audio && !constraints.video) {
+          log("Enable mic, video, or both before starting.");
+          return;
+        }
         try {
           localStream = await navigator.mediaDevices.getUserMedia(constraints);
         } catch (err) {
@@ -436,57 +562,24 @@
         log("Target ready and offer sent.");
       };
 
-      els.connectBtn.addEventListener("click", connectSocket);
-      els.registerBtn.addEventListener("click", registerUser);
       els.resetOtpBtn.addEventListener("click", () => {
         clearOtp();
-        log("Local OTP reset. Click Register again.");
+        log("Local OTP reset. Re-registering now.");
+        registerUser();
       });
-      els.roleSelect.addEventListener("change", updateRoleUI);
-      els.requestBtn.addEventListener("click", () => {
-        if (!socket) {
-          log("Connect to server first.");
-          return;
+      els.targetOtpInput.addEventListener("input", () => {
+        if (autoRequestTimer) {
+          clearTimeout(autoRequestTimer);
         }
-        const targetOtp = els.targetOtpInput.value.trim();
-        if (!targetOtp) {
-          log("Enter target OTP.");
-          return;
-        }
-        socket.emit(EVENTS.MONITOR_REQUEST, { targetOtp });
+        autoRequestTimer = setTimeout(maybeAutoRequest, 300);
       });
-      els.endBtn.addEventListener("click", () => {
-        if (!socket || !sessionId) {
-          log("No active session.");
-          return;
-        }
-        socket.emit(EVENTS.END_SESSION, { sessionId });
-      });
-      els.acceptBtn.addEventListener("click", () => {
-        if (!socket || !sessionId) {
-          log("No incoming session.");
-          return;
-        }
-        socket.emit(EVENTS.TARGET_RESPONSE, { sessionId, accept: true });
-      });
-      els.rejectBtn.addEventListener("click", () => {
-        if (!socket || !sessionId) {
-          log("No incoming session.");
-          return;
-        }
-        socket.emit(EVENTS.TARGET_RESPONSE, { sessionId, accept: false });
-      });
-      els.startCameraBtn.addEventListener("click", startTargetMedia);
-      els.endBtnTarget.addEventListener("click", () => {
-        if (!socket || !sessionId) {
-          log("No active session.");
-          return;
-        }
-        socket.emit(EVENTS.END_SESSION, { sessionId });
-      });
+      els.requestEndBtn.addEventListener("click", endCurrentSession);
 
       els.serverUrl.value = window.location.origin;
-      updateRoleUI();
+      sessionStorage.removeItem("demoOtp");
+      ensureLocalOtp(true);
+      connectSocket();
+      registerUser();
     </script>
   </body>
 </html>
